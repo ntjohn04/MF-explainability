@@ -52,8 +52,6 @@ def constructUtilityMatrix(ratings, sh, phi):
     nanrat = np.copy(ratings).astype(float)
     nanrat[nanrat == 0] = np.nan
 
-    U[U == 0]
-
     item_attr = []
     for i in range(sh[1]):
         if np.isnan(nanrat[:, i]).all():
