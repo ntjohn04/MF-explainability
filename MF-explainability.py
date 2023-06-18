@@ -131,7 +131,7 @@ def plotExplainability(svd, W, axes, srow, scol, colr):
 
     #show users
     #users = [svd.P[:, 0], svd.P[:, 1]]
-    #axes[m].scatter(users[0], users[1], c='purple')
+    #axes[srow][scol].scatter(users[0], users[1], c='purple')
 
     axes[srow][scol].scatter(points[0], points[1], c='cyan')
     axes[srow][scol].scatter(pot_points[0], pot_points[1], c='green')
@@ -152,7 +152,7 @@ def main():
     factors = 2
 
     #Other parameters
-    wMax = 2.5
+    wMax = 1
     wShift = 0
     num_epochs = 25
     Jtype = ['regular', 'explainable', 'utility']
@@ -167,7 +167,7 @@ def main():
         dtype=np.uint8)
     ratings_mat[data.movie_id.values-1, data.user_id.values-1] = data.rating.values
 
-    train_set = ratings_mat[:700]
+    train_set = ratings_mat
     sh = train_set.shape
 
     #TRAIN TEST SPLIT
@@ -199,7 +199,7 @@ def main():
     W = constructExplainabilityMatrix(train_set, sh, inds, nbr_size, theta)
 
     #PREPARE PLOTS
-    fig, expAxes = plt.subplots(nrows=2, ncols=2)
+    fig, expAxes = plt.subplots(nrows=2, ncols=3)
 
     print("\nBegin Training...")
     for m in range(3):
@@ -240,15 +240,22 @@ def main():
             plotExplainability(svd, U, expAxes, 1, 0, 'pink')
         elif Jtype[m] == 'explainable':
             plotExplainability(svd, W, expAxes, 0, 1, 'red')
-        elif Jtype[m] == 'utility':
             plotExplainability(svd, U, expAxes, 1, 1, 'pink')
+        elif Jtype[m] == 'utility':
+            plotExplainability(svd, W, expAxes, 0, 2, 'red')
+            plotExplainability(svd, U, expAxes, 1, 2, 'pink')
 
     plt.legend()
     expAxes[0][0].set_title('MF')
-    expAxes[0][1].set_title('EMF')
-
     expAxes[1][0].set_title('MF')
-    expAxes[1][1].set_title('UMF')
+
+    expAxes[0][1].set_title('EMF')
+    expAxes[1][1].set_title('EMF')
+
+    expAxes[0][2].set_title('UMF')
+    expAxes[1][2].set_title('UMF')
+
+
 
     plt.show()
 
