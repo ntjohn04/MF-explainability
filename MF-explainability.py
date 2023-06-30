@@ -7,6 +7,10 @@ import pandas as pd
 from tqdm import tqdm
 from sklearn.neighbors import NearestNeighbors
 from sklearn.linear_model import LogisticRegression
+from sklearn.svm import SVR
+
+CONSTRUCT_EXPLAIN = True
+CONSTRUCT_UTILITY = True
 
 class EMF():
     #parameters are numpy matrix, k factors, and random weight max
@@ -20,7 +24,7 @@ class EMF():
 
         return r
 
-def constructExplainabilityMatrix(ratings, sh, inds, nbr_size, theta):
+def constructExplainabilityMatrix(ratings, sh, inds, nbr_size):
     W = np.zeros_like(ratings).astype(float)
     
     for i in tqdm(range(sh[0])):
@@ -40,18 +44,19 @@ def constructExplainabilityMatrix(ratings, sh, inds, nbr_size, theta):
             for k in range(5):
                 exp += (k+1) * float(nbr_rats[k+1]) / (nbr_size)
             
-            if exp >= theta:
-                W[i][j] = exp
+            W[i][j] = exp
 
     print("Total non-zero:", np.count_nonzero(W))
     return W
 
-def constructUtilityMatrix(ratings, sh, phi):
+#combined utility global and similar
+def constructUtilityMatrix(ratings, sh, inds, nbr_size, phi):
     U = np.zeros_like(ratings).astype(float)
 
     nanrat = np.copy(ratings).astype(float)
     nanrat[nanrat == 0] = np.nan
 
+    #Global Item Attributes
     item_attr = []
     for i in range(sh[1]):
         if np.isnan(nanrat[:, i]).all():
@@ -61,82 +66,136 @@ def constructUtilityMatrix(ratings, sh, phi):
         nbr = np.sum(~np.isnan(nanrat[:, i]))
         mean = np.nanmean(nanrat[:, i])
         var = np.nanvar(nanrat[:, i])
+
         item_attr.append([nbr, mean, var])
 
     item_attr = np.asarray(item_attr)
 
+    #Similar User Item Attributes
+    print("Getting Attributes...")
+    sim_attr = [[0]*sh[1] for _ in range(sh[0])]
+    for i in tqdm(range(sh[0])):
+        for j in range(sh[1]):
+            if nanrat[i][j] != np.nan:
+                v = nanrat[inds[i][1:], i]
+                sim_nbr = np.sum(~np.isnan(v))
+                sim_mean = np.nanmean(v)
+                sim_var = np.nanvar(v)
+
+                sim_attr[i][j] = [sim_nbr, sim_mean, sim_var]
+
+
+    print("Filling Matrix...")
     for i in tqdm(range(sh[0])):
         x = []
-        y = []
         for j in range(sh[1]):
             if ratings[i][j] != 0:
                 x.append(j)
-                y.append(ratings[i][j])
+
+        y = ratings[i][x]
 
         if len(set(y)) < 2:
             continue
 
-        lr = LogisticRegression(max_iter=3000, multi_class='multinomial').fit(item_attr[x], np.asarray(y))
+        full_attr = []
+        for j in range(sh[1]):
+            full_attr.append(np.concatenate((item_attr[j], sim_attr[i][j])))
+
+        full_attr = np.asarray(full_attr)
+        full_attr = np.nan_to_num(full_attr)
+
+        lr = SVR(max_iter=3000).fit(full_attr[x], y)
         
         for j in range(sh[1]):
-            #if ratings[i][j] == 0:
-            exp = lr.predict(item_attr[j].reshape(1, -1))
-            if exp >= phi:
-                U[i][j] = exp
+            exp = lr.predict(full_attr[j].reshape(1, -1))
+            U[i][j] = exp
             
     print("Total non-zero:", np.count_nonzero(U))
     return U
 
-def plotExplainability(svd, W, axes, srow, scol, colr):
-    #pick a user with regular amount of explainable points
-    u = 523
-    #u = 49
-
-    #indices for explainable and non explainable points
-    exp = []
-    not_exp = []
-
-    for i, expval in enumerate(W[u]):
-        if expval == 0:
-            not_exp.append(i)
-        else:
-            exp.append(i)
-
-    exp = np.asarray(exp)
-    not_exp = np.asarray(not_exp)
-
-    explainable_points = [svd.QT[tuple(exp.T), 0], svd.QT[tuple(exp.T), 1]]
-
-    #not explainable points
-    points = [list(svd.QT[tuple(not_exp.T), 0]), list(svd.QT[tuple(not_exp.T), 1])]
-
-    #not explainable, potentially recommended (cos_sim > 0.9)
-    pot_points = [[], []]
-    b = np.asarray([svd.P[u][0], svd.P[u][1]])
-    cnt = 0
-    for i in range(len(points[0])):
-        g = i - cnt
-        a = np.asarray([points[0][g], points[1][g]])
+def getScores(ratings, svd, sh, test_set, U, W, topn, Jtype, sTheta, sPhi):
+    rmse = 0
+    for i in range(sh[0]):
+        for j in range(sh[1]):
+            if test_set[i][j] != 0:
+                pred = svd.predict(i, j)
+                err = float(test_set[i][j]) - pred
+                rmse += err**2
     
-        cosSim = np.dot(a, b) / (np.linalg.norm(a)*np.linalg.norm(b))
+    rmse = rmse / np.count_nonzero(test_set)
+    rmse = math.sqrt(rmse)
 
-        if cosSim > 0.9:
-            pot_points[0].append(points[0][g])
-            pot_points[1].append(points[1][g])
+    mep = 0
+    mer = 0
 
-            points[0].pop(g)
-            points[1].pop(g)
+    mup = 0
+    mur = 0
+    for i in tqdm(range(sh[0])):
+        ls = []
+        for j in range(sh[1]):
+            if ratings[i][j] != 0:
+                ls.append(0)
+            else:
+                ls.append(svd.predict(i, j))
 
-            cnt += 1
+        ls = np.asarray(ls)
+        inds = ls.argsort()[::-1][:topn]
 
-    #show users
-    #users = [svd.P[:, 0], svd.P[:, 1]]
-    #axes[srow][scol].scatter(users[0], users[1], c='purple')
+        exps = 0
+        utils = 0
 
-    axes[srow][scol].scatter(points[0], points[1], c='cyan')
-    axes[srow][scol].scatter(pot_points[0], pot_points[1], c='green')
-    axes[srow][scol].scatter(explainable_points[0], explainable_points[1], c=colr)
-    axes[srow][scol].plot([svd.P[u][0]], [svd.P[u][1]], marker='o', markersize=10, markeredgecolor='black', markerfacecolor='black')
+        tot_exps = 0
+        for val in W[i]:
+            if val >= sTheta:
+                tot_exps += 1
+
+        tot_utils = 0
+        for val in U[i]:
+            if val >= sPhi:
+                tot_utils += 1
+
+        for ind in inds:
+            if U[i][ind] >= sPhi:
+                utils += 1
+            if W[i][ind] >= sTheta:
+                exps += 1
+
+        mep += exps
+        mup += utils
+
+        if tot_exps != 0:
+            mer += exps / tot_exps
+        
+        if tot_utils != 0:
+            mur += utils / tot_utils
+
+    mep, mer, mup, mur = mep / sh[0] / topn, mer / sh[0], mup / sh[0] / topn, mur / sh[0]
+
+    return [Jtype, rmse, mep, mer, mup, mur]
+
+def displayScores(scores):
+    print("\t\tRMSE\t\tMEP\t\tMER\t\tMUP\t\tMUR")
+    for score in scores:
+        print(score[0], end="\t\t")
+        for i in range(1, 6):
+            print(round(score[i], 4), end="\t\t")
+        print()
+
+def getNeighbors(ratings, nbr_size):
+    inds = []
+    for a, r1 in enumerate(tqdm(ratings)):
+        sims = []
+        for b, r2 in enumerate(ratings):
+            if a != b:
+                cos_sim = np.dot(r1, r2) / (np.linalg.norm(r1)*np.linalg.norm(r2))
+                if np.isnan(cos_sim):
+                    cos_sim = 0
+                sims.append(cos_sim)
+            else:
+                sims.append(3)
+
+        inds.append(np.asarray(sims).argsort()[::-1][:nbr_size+1])
+    return np.asarray(inds)
 
 def main():
     random.seed(11)
@@ -144,18 +203,21 @@ def main():
 
     #Hyperparameters
     beta = 0.01
-    theta = 0.1
-    phi = 5
+    theta = 0.01
+    phi = 0.01
     lambdav = 0.005
     alph = 0.001
-    nbr_size = 20
-    factors = 2
+    nbr_size = 50
+    factors = 10
 
     #Other parameters
-    wMax = 1
+    wMax = 1.22
     wShift = 0
-    num_epochs = 25
-    Jtype = ['regular', 'explainable', 'utility']
+    num_epochs = 30
+    topn = 5
+    Jtype = ['regular', 'explain', 'utility']
+    sTheta = 0.01
+    sPhi = 0.01
 
     #Reading dataset (MovieLens 1M movie ratings dataset: downloaded from https://grouplens.org/datasets/movielens/1m/)
     data = pd.io.parsers.read_csv('data/ratings.dat', 
@@ -167,7 +229,8 @@ def main():
         dtype=np.uint8)
     ratings_mat[data.movie_id.values-1, data.user_id.values-1] = data.rating.values
 
-    train_set = ratings_mat
+    full_set = ratings_mat
+    train_set = np.copy(full_set)
     sh = train_set.shape
 
     #TRAIN TEST SPLIT
@@ -186,23 +249,41 @@ def main():
     train_set[tuple(test_indices.T)] = 0
 
     #UTILITY MATRIX
-    print("Constructing Utility Matrix...")
-    U = constructUtilityMatrix(train_set, sh, phi)
+    if CONSTRUCT_UTILITY:
+        print("\nFinding Nearest Neighbors...")
+        inds = getNeighbors(full_set, nbr_size)
+        print("Constructing Utility Matrix...")
+        U = constructUtilityMatrix(full_set, sh, inds, nbr_size, phi)
+        #U = constructUtilityMatrix(full_set, sh)
+        np.save("u.npy", U)
+    else:
+        print("Loading Utility Matrix...")
+        U = np.load("u.npy")
 
     #EXPLAINABILITY MATRIX
-    nbrs = NearestNeighbors(n_neighbors=nbr_size+1, algorithm='kd_tree').fit(train_set)
+    if CONSTRUCT_EXPLAIN:
+        print("\nFinding Nearest Neighbors...")
+        inds = getNeighbors(full_set, nbr_size)
 
-    print("\nFinding Nearest Neighbors...")
-    dists, inds = nbrs.kneighbors(train_set)
+        print("Constructing Explainability Matrix...")
+        W = constructExplainabilityMatrix(full_set, sh, inds, nbr_size)
+        np.save("w.npy", W)
+    else:
+        print("Loading Explainability Matrix...")
+        W = np.load("w.npy")
 
-    print("Constructing Explainability Matrix...")
-    W = constructExplainabilityMatrix(train_set, sh, inds, nbr_size, theta)
+    U_train = np.copy(U)
+    U_train[tuple(test_indices.T)] = 0
+
+    W_train = np.copy(W)
+    W_train[tuple(test_indices.T)] = 0
 
     #PREPARE PLOTS
     fig, expAxes = plt.subplots(nrows=2, ncols=3)
 
     print("\nBegin Training...")
-    for m in range(3):
+    scores = []
+    for m in range(len(Jtype)):
         print("Training with J = " + str(Jtype[m]) + "...")
         svd = EMF(train_set, factors, wMax, wShift)
 
@@ -215,49 +296,31 @@ def main():
                         r = svd.predict(i, j)
                         err = (train_set[i][j] - r)
 
-                        if Jtype[m] == 'regular':
+                        if Jtype[m] == 'regular' or (Jtype[m] == 'explain' and W_train[i][j] < theta) or (Jtype[m] == 'utility' and U_train[i][j] < phi):
                             #regularized
-                            svd.P[i] += alph * (svd.QT[j] * err - beta * svd.P[i])
-                            svd.QT[j] += alph * (svd.P[i] * err - beta * svd.QT[j])
+                            svd.P[i] += alph * (2 * svd.QT[j] * err - beta * svd.P[i])
+                            svd.QT[j] += alph * (2 * svd.P[i] * err - beta * svd.QT[j])
 
-                        elif Jtype[m] == 'explainable':
+                        elif Jtype[m] == 'explain':
                             #regularized with explainable soft constraint
-                            svd.P[i] += alph * (svd.QT[j] * err - beta * svd.P[i] - lambdav * (svd.P[i] - svd.QT[j]) * W[i][j])
-                            svd.QT[j] += alph * (svd.P[i] * err - beta * svd.QT[j] + lambdav * (svd.P[i] - svd.QT[j]) * W[i][j])
+                            svd.P[i] += alph * (2 * svd.QT[j] * err - beta * svd.P[i] - lambdav * (svd.P[i] - svd.QT[j]) * W_train[i][j])
+                            svd.QT[j] += alph * (2 * svd.P[i] * err - beta * svd.QT[j] + lambdav * (svd.P[i] - svd.QT[j]) * W_train[i][j])
 
                         elif Jtype[m] == 'utility':
                             #regularized with utility soft constraint
-                            svd.P[i] += alph * (svd.QT[j] * err - beta * svd.P[i] - lambdav * (svd.P[i] - svd.QT[j]) * U[i][j])
-                            svd.QT[j] += alph * (svd.P[i] * err - beta * svd.QT[j] + lambdav * (svd.P[i] - svd.QT[j]) * U[i][j])
+                            svd.P[i] += alph * (2 * svd.QT[j] * err - beta * svd.P[i] - lambdav * (svd.P[i] - svd.QT[j]) * U_train[i][j])
+                            svd.QT[j] += alph * (2 * svd.P[i] * err - beta * svd.QT[j] + lambdav * (svd.P[i] - svd.QT[j]) * U_train[i][j])
 
                         rloss += err**2
 
             print("EPOCH:", epoch+1, "LOSS:", rloss)
             epoch_losses.append(rloss)
 
-        if Jtype[m] == 'regular':
-            plotExplainability(svd, W, expAxes, 0, 0, 'red')
-            plotExplainability(svd, U, expAxes, 1, 0, 'pink')
-        elif Jtype[m] == 'explainable':
-            plotExplainability(svd, W, expAxes, 0, 1, 'red')
-            plotExplainability(svd, U, expAxes, 1, 1, 'pink')
-        elif Jtype[m] == 'utility':
-            plotExplainability(svd, W, expAxes, 0, 2, 'red')
-            plotExplainability(svd, U, expAxes, 1, 2, 'pink')
+        scores.append(getScores(train_set, svd, sh, test_set, U, W, topn, Jtype[m], sTheta, sPhi))
+        np.save(Jtype[m] + "_P.npy", svd.P)
+        np.save(Jtype[m] + "_QT.npy", svd.QT)
 
-    plt.legend()
-    expAxes[0][0].set_title('MF')
-    expAxes[1][0].set_title('MF')
-
-    expAxes[0][1].set_title('EMF')
-    expAxes[1][1].set_title('EMF')
-
-    expAxes[0][2].set_title('UMF')
-    expAxes[1][2].set_title('UMF')
-
-
-
-    plt.show()
+    displayScores(scores)
 
 if __name__ == "__main__":
     main()
